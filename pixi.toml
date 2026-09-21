@@ -1,0 +1,13 @@
+[workspace]
+authors = ["Rohan Girish <r.rohangirish@unibas.ch>"]
+channels = ["conda-forge"]
+name = "register-manabar-pubquiz"
+platforms = ["linux-64", "win-64", "osx-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = "==3.12"
+beautifulsoup4 = ">=4.15.0,<5"
+requests = "*"
