@@ -2,43 +2,48 @@
 """
 Auto-register for the ManaBar Pub Quiz.
 
+Your details live in config.json (git-ignored). Copy config.example.json to
+config.json and fill it in.
+
 Requirements:
     pip install requests beautifulsoup4
 
 Usage:
     python register_pubquiz.py                # next Wednesday
-    python register_pubquiz.py 2026-09-16     # a specific quiz date
+    python register_pubquiz.py 2026-09-23     # a specific quiz date
 """
 
 import sys
 import json
 import datetime as dt
 from pathlib import Path
-from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
-# site details
+# site details, never changes
 BASE_URL = "https://manabar.ch"
 URL_TMPL = BASE_URL + "/en/event/weekly-pub-quiz-{date}"  # {date} = YYYY-MM-DD
-QUIZ_WEEKDAY = 2  # Wednesday=2
+SUBMIT_URL = "https://directus.manabar.ch/items/form_submissions"
+QUIZ_WEEKDAY = 2  # Monday=0 ... Wednesday=2
 CONFIG_FILE = Path(__file__).with_name("config.json")
 
-# maps json to keys
 KEY_TO_LABEL = {
-    "name": "name",
     "email": "email",
     "team": "team",
     "group_size": "group size",
     "message": "message",
+    "name": "name",
 }
-REQUIRED_KEYS = ["name", "email", "team", "group_size"]
+REQUIRED_KEYS = ["name", "email", "team", "group_size", "form_id"]
 
 
 def load_config() -> dict:
     if not CONFIG_FILE.exists():
-        sys.exit(f"! {CONFIG_FILE.name} not found.")
+        sys.exit(
+            f"! {CONFIG_FILE.name} not found. Copy config.example.json to "
+            f"config.json and fill it in."
+        )
     with CONFIG_FILE.open(encoding="utf-8") as fh:
         cfg = json.load(fh)
     missing = [k for k in REQUIRED_KEYS if not cfg.get(k)]
@@ -54,44 +59,47 @@ def next_quiz_date(weekday: int = QUIZ_WEEKDAY) -> dt.date:
     return today + dt.timedelta(days=days_ahead)
 
 
-def field_name_for_label(form, keyword: str):
-    """Return the input `name` whose <label> text contains `keyword`."""
-    for label in form.find_all("label"):
-        if keyword in label.get_text(strip=True).lower():
-            target_id = label.get("for")
-            if target_id:
-                el = form.find(id=target_id)
-                if el and el.get("name"):
-                    return el["name"]
+def config_key_for_label(label_text: str):
+    """Return the config key whose keyword appears in this label's text."""
+    text = label_text.strip().lower()
+    for key, keyword in KEY_TO_LABEL.items():
+        if keyword in text:
+            return key
     return None
 
 
-def build_payload(form, cfg: dict) -> dict:
-    """Seed the payload with every existing field value, then overlay ours."""
-    payload = {}
+def build_answers(form, cfg: dict) -> list:
+    """Read the weekly field ids from the form and pair them with the values."""
+    # Map field id -> label text, from <label for="ID">.
+    id_to_label = {
+        lbl.get("for"): lbl.get_text(strip=True)
+        for lbl in form.find_all("label")
+        if lbl.get("for")
+    }
 
-    # seed with existing values
+    answers = []
     for el in form.find_all(["input", "textarea"]):
-        name = el.get("name")
-        if not name:
+        fid = el.get("name")
+        if not fid or fid == "data_policy":
             continue
-        if el.name == "textarea":
-            payload[name] = el.get_text() or ""
-        elif el.get("type") == "checkbox":
-            # tick data policy
-            payload[name] = el.get("value") or "on"
+        if el.get("type") in ("submit", "button"):
+            continue
+
+        if el.get("type") == "hidden":
+            value = el.get("value", "")  # e.g. the event date
         else:
-            payload[name] = el.get("value", "")
+            key = config_key_for_label(id_to_label.get(fid, ""))
+            if key is None:
+                print(
+                    f"  ! Field {fid} (label {id_to_label.get(fid)!r}) has no "
+                    f"config mapping — sending empty."
+                )
+                value = ""
+            else:
+                value = cfg.get(key, "")
+        answers.append({"field": fid, "value": value})
 
-    # Overlay your details, matched by label text.
-    for key, keyword in KEY_TO_LABEL.items():
-        name = field_name_for_label(form, keyword)
-        if name is None:
-            print(f"  ! Could not find a field for '{keyword}' — skipping.")
-            continue
-        payload[name] = cfg.get(key, "")
-
-    return payload
+    return answers
 
 
 def main():
@@ -103,43 +111,38 @@ def main():
     print(f"Event URL : {url}")
 
     session = requests.Session()
-    session.headers["User-Agent"] = "Mozilla/5.0 (pub-quiz-registration-script)"
+    session.headers.update(
+        {
+            "User-Agent": "Mozilla/5.0 (pub-quiz-registration-script)",
+            "Origin": BASE_URL,
+            "Referer": BASE_URL + "/",
+        }
+    )
 
-    # Fetch the live form
+    # Fetch the live page and read this week's form field ids.
     resp = session.get(url, timeout=30)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    form = soup.find("form")
+    form = BeautifulSoup(resp.text, "html.parser").find("form")
     if form is None:
         sys.exit("! No <form> found on the page — the URL or page layout changed.")
 
-    payload = build_payload(form, cfg)
-    action = urljoin(url, form.get("action") or url)
-    method = (form.get("method") or "get").lower()
+    payload = {
+        "form": cfg["form_id"],
+        "answers": build_answers(form, cfg),
+        "data_policy": True,
+    }
 
-    print("\nSubmitting:")
-    for k, v in payload.items():
-        print(f"  {k} = {v!r}")
+    print("\nSubmitting to Directus:")
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
 
-    # Submit using the form's own method.
-    if method == "post":
-        result = session.post(action, data=payload, timeout=30)
+    result = session.post(SUBMIT_URL, json=payload, timeout=30)
+
+    print(f"\nHTTP {result.status_code}")
+    if result.status_code == 204:
+        print("--> Success. You're registered.")
     else:
-        result = session.get(action, params=payload, timeout=30)
-    result.raise_for_status()
-
-    # verify manually first check
-    text = result.text.lower()
-    good = "thank" in text or "success" in text or "confirm" in text
-    bad = "error" in text or "required" in text
-
-    print(f"\nHTTP {result.status_code}  ->  {result.url}")
-    if good and not bad:
-        print("--> Looks like the registration went through.")
-    else:
-        print(
-            "!! Couldn't confirm success from the response. Verify manually!"
-        )
+        print("!! Unexpected response — registration may NOT have gone through.")
+        print(result.text[:500])
 
 
 if __name__ == "__main__":
