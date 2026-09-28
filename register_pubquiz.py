@@ -24,7 +24,9 @@ from bs4 import BeautifulSoup
 # site details, never changes
 BASE_URL = "https://manabar.ch"
 URL_TMPL = BASE_URL + "/en/event/weekly-pub-quiz-{date}"  # {date} = YYYY-MM-DD
-SUBMIT_URL = "https://directus.manabar.ch/items/form_submissions"
+DIRECTUS_URL = "https://directus.manabar.ch"
+EVENTS_URL = DIRECTUS_URL + "/items/events"
+SUBMIT_URL = DIRECTUS_URL + "/items/form_submissions"
 QUIZ_WEEKDAY = 2  # Monday=0 ... Wednesday=2
 CONFIG_FILE = Path(__file__).with_name("config.json")
 
@@ -35,7 +37,7 @@ KEY_TO_LABEL = {
     "message": "message",
     "name": "name",
 }
-REQUIRED_KEYS = ["name", "email", "team", "group_size", "form_id"]
+REQUIRED_KEYS = ["name", "email", "team", "group_size"]
 
 
 def load_config() -> dict:
@@ -57,6 +59,30 @@ def next_quiz_date(weekday: int = QUIZ_WEEKDAY) -> dt.date:
     today = dt.date.today()
     days_ahead = (weekday - today.weekday()) % 7
     return today + dt.timedelta(days=days_ahead)
+
+
+def fetch_form_id(session: requests.Session, slug: str) -> int:
+    """Look up the event's form id in Directus (it changes every week).
+
+    Each event has a `content` list; the registration form is the entry whose
+    collection is "form". This is the same public read the site itself does.
+    """
+    resp = session.get(
+        EVENTS_URL,
+        params={
+            "filter[slug][_eq]": slug,
+            "fields": "content.collection,content.item",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    events = resp.json().get("data") or []
+    if not events:
+        sys.exit(f"! No event found in Directus with slug {slug!r}.")
+    for block in events[0].get("content") or []:
+        if block.get("collection") == "form":
+            return int(block["item"])
+    sys.exit(f"! Event {slug!r} has no registration form attached.")
 
 
 def config_key_for_label(label_text: str):
@@ -106,6 +132,7 @@ def main():
     cfg = load_config()
 
     date = dt.date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 else next_quiz_date()
+    slug = f"weekly-pub-quiz-{date.isoformat()}"
     url = URL_TMPL.format(date=date.isoformat())
     print(f"Quiz date : {date:%A %d %B %Y}")
     print(f"Event URL : {url}")
@@ -126,8 +153,11 @@ def main():
     if form is None:
         sys.exit("! No <form> found on the page — the URL or page layout changed.")
 
+    form_id = fetch_form_id(session, slug)
+    print(f"Form id   : {form_id}")
+
     payload = {
-        "form": cfg["form_id"],
+        "form": form_id,
         "answers": build_answers(form, cfg),
         "data_policy": True,
     }
