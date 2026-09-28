@@ -1,16 +1,6 @@
 #!/usr/bin/env python3
 """
 Auto-register for the ManaBar Pub Quiz.
-
-Your details live in config.json (git-ignored). Copy config.example.json to
-config.json and fill it in.
-
-Requirements:
-    pip install requests beautifulsoup4
-
-Usage:
-    python register_pubquiz.py                # next Wednesday
-    python register_pubquiz.py 2026-09-23     # a specific quiz date
 """
 
 import sys
