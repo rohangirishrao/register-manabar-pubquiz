@@ -13,16 +13,19 @@ pip install requests beautifulsoup4
 ```
 
 The site posts registrations to its Directus CMS (`items/form_submissions`), so
-the script does the same. The weekly field ids are scraped from the page
-automatically; the one value you currently set yourself is `form_id` in
-`config.json` (grab it from the submit request's payload in your browser's
-Network tab — auto-detection is a TODO).
+the script does the same. Everything that changes weekly is detected
+automatically: the form id is read from Directus (`items/events`, by slug) and
+the field ids are scraped from the event page.
 
-## Usage
+## Usage (recommended)
+
+Install [pixi](https://pixi.prefix.dev/latest/).
+
+Clone the repo and cd.
 
 ```bash
-python register_pubquiz.py                # next Wednesday
-python register_pubquiz.py 2026-09-16     # a specific quiz date
+pixi run python register_manabar_pubquiz.py # next Wednesday
+pixi run python register_manabar_pubquiz.py 2026-09-30 # specific date
 ```
 
 A successful submission returns HTTP 204. Failures are shown in the console.
