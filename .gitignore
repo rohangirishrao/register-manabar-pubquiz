@@ -10,3 +10,6 @@ venv/
 .pixi/*
 !.pixi/config.toml
 .gitattributes
+
+# Cron output (contains your submitted details)
+cron.log
