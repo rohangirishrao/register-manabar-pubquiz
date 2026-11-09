@@ -5,6 +5,7 @@ Auto-register for the ManaBar Pub Quiz.
 
 import sys
 import json
+import time
 import datetime as dt
 from pathlib import Path
 
@@ -19,6 +20,10 @@ EVENTS_URL = DIRECTUS_URL + "/items/events"
 SUBMIT_URL = DIRECTUS_URL + "/items/form_submissions"
 QUIZ_WEEKDAY = 2  # Monday=0 ... Wednesday=2
 CONFIG_FILE = Path(__file__).with_name("config.json")
+
+# How long to keep waiting for the form to go live (registration opens ~noon).
+RETRY_INTERVAL = 5     # seconds between checks
+RETRY_MAX_WAIT = 600   # give up after 10 minutes
 
 KEY_TO_LABEL = {
     "email": "email",
@@ -51,11 +56,12 @@ def next_quiz_date(weekday: int = QUIZ_WEEKDAY) -> dt.date:
     return today + dt.timedelta(days=days_ahead)
 
 
-def fetch_form_id(session: requests.Session, slug: str) -> int:
+def fetch_form_id(session: requests.Session, slug: str):
     """Look up the event's form id in Directus (it changes every week).
 
     Each event has a `content` list; the registration form is the entry whose
     collection is "form". This is the same public read the site itself does.
+    Returns None if the event or its form isn't there (yet).
     """
     resp = session.get(
         EVENTS_URL,
@@ -68,11 +74,42 @@ def fetch_form_id(session: requests.Session, slug: str) -> int:
     resp.raise_for_status()
     events = resp.json().get("data") or []
     if not events:
-        sys.exit(f"! No event found in Directus with slug {slug!r}.")
+        return None
     for block in events[0].get("content") or []:
         if block.get("collection") == "form":
             return int(block["item"])
-    sys.exit(f"! Event {slug!r} has no registration form attached.")
+    return None
+
+
+def wait_for_form(session: requests.Session, url: str, slug: str):
+    """Poll until the registration form is live, then return (form, form_id).
+
+    Registration opens around Monday noon, so the page can exist a few seconds
+    before the form does. We keep checking every RETRY_INTERVAL seconds for up
+    to RETRY_MAX_WAIT seconds, and give up after that.
+    """
+    deadline = time.monotonic() + RETRY_MAX_WAIT
+    attempt = 0
+    while True:
+        attempt += 1
+        stamp = dt.datetime.now().strftime("%H:%M:%S")
+        try:
+            resp = session.get(url, timeout=30, headers={"Cache-Control": "no-cache"})
+            resp.raise_for_status()
+            form = BeautifulSoup(resp.text, "html.parser").find("form")
+            form_id = fetch_form_id(session, slug) if form is not None else None
+            if form is not None and form_id is not None:
+                print(f"[{stamp}] attempt {attempt}: form is live", flush=True)
+                return form, form_id
+            reason = "no form on page" if form is None else "form id not in Directus"
+        except requests.RequestException as exc:
+            reason = f"request failed ({exc.__class__.__name__})"
+
+        if time.monotonic() >= deadline:
+            sys.exit(f"[{stamp}] ! Gave up after {attempt} attempts: {reason}.")
+        print(f"[{stamp}] attempt {attempt}: {reason}, retrying in "
+              f"{RETRY_INTERVAL}s", flush=True)
+        time.sleep(RETRY_INTERVAL)
 
 
 def config_key_for_label(label_text: str):
@@ -136,14 +173,8 @@ def main():
         }
     )
 
-    # Fetch the live page and read this week's form field ids.
-    resp = session.get(url, timeout=30)
-    resp.raise_for_status()
-    form = BeautifulSoup(resp.text, "html.parser").find("form")
-    if form is None:
-        sys.exit("! No <form> found on the page — the URL or page layout changed.")
-
-    form_id = fetch_form_id(session, slug)
+    # Wait until registration is open, then read this week's form field ids.
+    form, form_id = wait_for_form(session, url, slug)
     print(f"Form id   : {form_id}")
 
     payload = {
