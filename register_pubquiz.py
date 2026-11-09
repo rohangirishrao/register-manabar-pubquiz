@@ -24,7 +24,7 @@ CONFIG_FILE = Path(__file__).with_name("config.json")
 
 # How long to keep waiting for the form to go live (registration opens ~noon).
 RETRY_INTERVAL = 5     # seconds between checks
-RETRY_MAX_WAIT = 600   # give up after 10 minutes
+RETRY_MAX_WAIT = 120   # give up after 2 minutes
 
 # Directus field name -> key in config.json
 FIELD_TO_CONFIG = {

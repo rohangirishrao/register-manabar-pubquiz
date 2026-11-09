@@ -11,7 +11,7 @@ Clone the repo. Fill in your details in `config.example.json` and rename it to `
 The site posts registrations to its Directus CMS (`items/form_submissions`), so
 the script does the same. Everything that changes weekly (form id and field
 ids) is read from Directus (`items/events`, by slug). If the form isn't up yet,
-the script retries every 5 seconds for up to 10 minutes.
+the script retries every 5 seconds for up to 2 minutes.
 
 ## Usage (recommended)
 
