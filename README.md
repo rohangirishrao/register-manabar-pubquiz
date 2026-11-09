@@ -9,9 +9,9 @@ URL changes each week, so the script takes care of this.
 Clone the repo. Fill in your details in `config.example.json` and rename it to `config.json`.
 
 The site posts registrations to its Directus CMS (`items/form_submissions`), so
-the script does the same. Everything that changes weekly is detected
-automatically: the form id is read from Directus (`items/events`, by slug) and
-the field ids are scraped from the event page.
+the script does the same. Everything that changes weekly (form id and field
+ids) is read from Directus (`items/events`, by slug). If the form isn't up yet,
+the script retries every 5 seconds for up to 10 minutes.
 
 ## Usage (recommended)
 

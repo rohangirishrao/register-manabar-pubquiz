@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
 Auto-register for the ManaBar Pub Quiz.
+
+Reads the event's registration form from Directus (the CMS behind manabar.ch)
+and submits your details from config.json, the same way the website does.
 """
 
 import sys
@@ -10,27 +13,26 @@ import datetime as dt
 from pathlib import Path
 
 import requests
-from bs4 import BeautifulSoup
 
-# site details, never changes
 BASE_URL = "https://manabar.ch"
-URL_TMPL = BASE_URL + "/en/event/weekly-pub-quiz-{date}"  # {date} = YYYY-MM-DD
 DIRECTUS_URL = "https://directus.manabar.ch"
 EVENTS_URL = DIRECTUS_URL + "/items/events"
 SUBMIT_URL = DIRECTUS_URL + "/items/form_submissions"
 QUIZ_WEEKDAY = 2  # Monday=0 ... Wednesday=2
+LANGUAGE = "en"
 CONFIG_FILE = Path(__file__).with_name("config.json")
 
 # How long to keep waiting for the form to go live (registration opens ~noon).
 RETRY_INTERVAL = 5     # seconds between checks
 RETRY_MAX_WAIT = 600   # give up after 10 minutes
 
-KEY_TO_LABEL = {
-    "email": "email",
-    "team": "team",
-    "group_size": "group size",
-    "message": "message",
+# Directus field name -> key in config.json
+FIELD_TO_CONFIG = {
     "name": "name",
+    "email": "email",
+    "team_name": "team",
+    "amount_people": "group_size",
+    "message": "message",
 }
 REQUIRED_KEYS = ["name", "email", "team", "group_size"]
 
@@ -56,18 +58,19 @@ def next_quiz_date(weekday: int = QUIZ_WEEKDAY) -> dt.date:
     return today + dt.timedelta(days=days_ahead)
 
 
-def fetch_form_id(session: requests.Session, slug: str):
-    """Look up the event's form id in Directus (it changes every week).
+def fetch_form(session: requests.Session, slug: str):
+    """Return (form_id, fields) for the event, or None if there's no form yet.
 
     Each event has a `content` list; the registration form is the entry whose
-    collection is "form". This is the same public read the site itself does.
-    Returns None if the event or its form isn't there (yet).
+    collection is "form". Its fields are stored per language in `translations`.
     """
     resp = session.get(
         EVENTS_URL,
         params={
             "filter[slug][_eq]": slug,
-            "fields": "content.collection,content.item",
+            "fields": "content.collection,content.item.id,"
+                      "content.item.translations.languages_code,"
+                      "content.item.translations.fields.*",
         },
         timeout=30,
     )
@@ -75,18 +78,22 @@ def fetch_form_id(session: requests.Session, slug: str):
     events = resp.json().get("data") or []
     if not events:
         return None
+
     for block in events[0].get("content") or []:
-        if block.get("collection") == "form":
-            return int(block["item"])
+        if block.get("collection") != "form":
+            continue
+        translations = block["item"].get("translations") or []
+        for translation in translations:
+            if translation.get("languages_code", "").startswith(LANGUAGE):
+                if translation.get("fields"):
+                    return block["item"]["id"], translation["fields"]
     return None
 
 
-def wait_for_form(session: requests.Session, url: str, slug: str):
-    """Poll until the registration form is live, then return (form, form_id).
+def wait_for_form(session: requests.Session, slug: str):
+    """Poll Directus until the registration form exists, then return it.
 
-    Registration opens around Monday noon, so the page can exist a few seconds
-    before the form does. We keep checking every RETRY_INTERVAL seconds for up
-    to RETRY_MAX_WAIT seconds, and give up after that.
+    Checks every RETRY_INTERVAL seconds for up to RETRY_MAX_WAIT seconds.
     """
     deadline = time.monotonic() + RETRY_MAX_WAIT
     attempt = 0
@@ -94,14 +101,11 @@ def wait_for_form(session: requests.Session, url: str, slug: str):
         attempt += 1
         stamp = dt.datetime.now().strftime("%H:%M:%S")
         try:
-            resp = session.get(url, timeout=30, headers={"Cache-Control": "no-cache"})
-            resp.raise_for_status()
-            form = BeautifulSoup(resp.text, "html.parser").find("form")
-            form_id = fetch_form_id(session, slug) if form is not None else None
-            if form is not None and form_id is not None:
+            form = fetch_form(session, slug)
+            if form is not None:
                 print(f"[{stamp}] attempt {attempt}: form is live", flush=True)
-                return form, form_id
-            reason = "no form on page" if form is None else "form id not in Directus"
+                return form
+            reason = "no form for this event yet"
         except requests.RequestException as exc:
             reason = f"request failed ({exc.__class__.__name__})"
 
@@ -112,46 +116,19 @@ def wait_for_form(session: requests.Session, url: str, slug: str):
         time.sleep(RETRY_INTERVAL)
 
 
-def config_key_for_label(label_text: str):
-    """Return the config key whose keyword appears in this label's text."""
-    text = label_text.strip().lower()
-    for key, keyword in KEY_TO_LABEL.items():
-        if keyword in text:
-            return key
-    return None
-
-
-def build_answers(form, cfg: dict) -> list:
-    """Read the weekly field ids from the form and pair them with the values."""
-    # Map field id -> label text, from <label for="ID">.
-    id_to_label = {
-        lbl.get("for"): lbl.get_text(strip=True)
-        for lbl in form.find_all("label")
-        if lbl.get("for")
-    }
-
+def build_answers(fields: list, cfg: dict, date: dt.date) -> list:
+    """Pair each form field with its value, like the website's form does."""
     answers = []
-    for el in form.find_all(["input", "textarea"]):
-        fid = el.get("name")
-        if not fid or fid == "data_policy":
-            continue
-        if el.get("type") in ("submit", "button"):
-            continue
-
-        if el.get("type") == "hidden":
-            value = el.get("value", "")  # e.g. the event date
+    for field in fields:
+        if field.get("type") == "hidden":
+            # The website fills "{{date}}" with the event date.
+            value = (field.get("value") or "").replace("{{date}}", date.isoformat())
+        elif field.get("name") in FIELD_TO_CONFIG:
+            value = cfg.get(FIELD_TO_CONFIG[field["name"]], "")
         else:
-            key = config_key_for_label(id_to_label.get(fid, ""))
-            if key is None:
-                print(
-                    f"  ! Field {fid} (label {id_to_label.get(fid)!r}) has no "
-                    f"config mapping — sending empty."
-                )
-                value = ""
-            else:
-                value = cfg.get(key, "")
-        answers.append({"field": fid, "value": value})
-
+            print(f"  ! Field {field.get('name')!r} has no config mapping — sending empty.")
+            value = ""
+        answers.append({"field": str(field["id"]), "value": value})
     return answers
 
 
@@ -160,9 +137,8 @@ def main():
 
     date = dt.date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 else next_quiz_date()
     slug = f"weekly-pub-quiz-{date.isoformat()}"
-    url = URL_TMPL.format(date=date.isoformat())
     print(f"Quiz date : {date:%A %d %B %Y}")
-    print(f"Event URL : {url}")
+    print(f"Event URL : {BASE_URL}/{LANGUAGE}/event/{slug}")
 
     session = requests.Session()
     session.headers.update(
@@ -173,13 +149,12 @@ def main():
         }
     )
 
-    # Wait until registration is open, then read this week's form field ids.
-    form, form_id = wait_for_form(session, url, slug)
+    form_id, fields = wait_for_form(session, slug)
     print(f"Form id   : {form_id}")
 
     payload = {
         "form": form_id,
-        "answers": build_answers(form, cfg),
+        "answers": build_answers(fields, cfg, date),
         "data_policy": True,
     }
 
